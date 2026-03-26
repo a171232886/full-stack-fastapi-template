@@ -39,9 +39,15 @@ def read_users(session: SessionDep, skip: int = 0, limit: int = 100) -> Any:
     Retrieve users.
     """
 
+    # SELECT count(*) FROM user
     count_statement = select(func.count()).select_from(User)
     count = session.exec(count_statement).one()
 
+    # SELECT * 
+    # FROM user_table_name  -- 具体表名取决于 User 模型的 __tablename__ 属性
+    # ORDER BY created_at DESC
+    # OFFSET :skip
+    # LIMIT :limit;
     statement = (
         select(User).order_by(col(User.created_at).desc()).offset(skip).limit(limit)
     )

@@ -1,47 +1,67 @@
 services:
-
+  # ---------------------------------------------------------------------------
+  # 1. 数据库服务 (PostgreSQL)
+  # ---------------------------------------------------------------------------
   db:
-    image: postgres:18
-    restart: always
+    image: postgres:18.3  # 使用 PostgreSQL 18.3 版本镜像
+    restart: always       # 容器退出后总是自动重启
+    # 健康检查：确保数据库已准备好接受连接
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      retries: 5
-      start_period: 30s
-      timeout: 10s
+      interval: 10s       # 每 10 秒检查一次
+      retries: 5          # 失败 5 次后标记为不健康
+      start_period: 30s   # 启动后 30 秒内不计算失败次数（给数据库启动时间）
+      timeout: 10s        # 检查超时时间
     volumes:
+      # 将数据持久化到名为 'app-db-data' 的卷中，防止容器删除后数据丢失
       - app-db-data:/var/lib/postgresql/data/pgdata
     env_file:
-      - .env
+      - .env              # 加载根目录下的 .env 文件
     environment:
+      # 设置 PGDATA 环境变量，指定数据存储路径（与 volumes 挂载路径一致）
       - PGDATA=/var/lib/postgresql/data/pgdata
+      # 以下变量如果未在 .env 中设置，启动时会报错提示
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD?Variable not set}
       - POSTGRES_USER=${POSTGRES_USER?Variable not set}
       - POSTGRES_DB=${POSTGRES_DB?Variable not set}
+    ports:
+      - "5432:5432"     # 将容器的 5432 端口映射到主机的 5432 端口，方便本地调试
 
+  # ---------------------------------------------------------------------------
+  # 2. 数据库管理工具 (Adminer)
+  # 提供网页版数据库界面，方便调试和查看数据
+  # ---------------------------------------------------------------------------
   adminer:
     image: adminer
     restart: always
     networks:
-      - traefik-public
-      - default
+      - traefik-public    # 连接到公共 Traefik 网络（用于外部访问）
+      - default           # 连接到默认网络（用于访问内部 db 服务）
     depends_on:
-      - db
+      - db                # 确保 db 服务先启动
     environment:
-      - ADMINER_DESIGN=pepa-linha-dark
+      - ADMINER_DESIGN=pepa-linha-dark # 设置 Adminer 的 UI 主题为深色模式
     labels:
+      # Traefik 配置标签，用于自动路由和生成 HTTPS 证书
       - traefik.enable=true
       - traefik.docker.network=traefik-public
       - traefik.constraint-label=traefik-public
+      # 路由规则：访问 adminer.你的域名 时转发到此服务
       - traefik.http.routers.${STACK_NAME?Variable not set}-adminer-http.rule=Host(`adminer.${DOMAIN?Variable not set}`)
       - traefik.http.routers.${STACK_NAME?Variable not set}-adminer-http.entrypoints=http
-      - traefik.http.routers.${STACK_NAME?Variable not set}-adminer-http.middlewares=https-redirect
+      - traefik.http.routers.${STACK_NAME?Variable not set}-adminer-http.middlewares=https-redirect # 强制跳转 HTTPS
       - traefik.http.routers.${STACK_NAME?Variable not set}-adminer-https.rule=Host(`adminer.${DOMAIN?Variable not set}`)
       - traefik.http.routers.${STACK_NAME?Variable not set}-adminer-https.entrypoints=https
       - traefik.http.routers.${STACK_NAME?Variable not set}-adminer-https.tls=true
-      - traefik.http.routers.${STACK_NAME?Variable not set}-adminer-https.tls.certresolver=le
+      - traefik.http.routers.${STACK_NAME?Variable not set}-adminer-https.tls.certresolver=le # 使用 Let's Encrypt 申请证书
+      # 负载均衡配置：转发到容器的 8080 端口 (Adminer 默认端口)
       - traefik.http.services.${STACK_NAME?Variable not set}-adminer.loadbalancer.server.port=8080
 
+  # ---------------------------------------------------------------------------
+  # 3. 后端预启动服务 (Prestart)
+  # 这是一个一次性任务，在主后端服务启动前运行
+  # 主要用途：运行数据库迁移 (Alembic)、创建初始超级用户等
+  # ---------------------------------------------------------------------------
   prestart:
     image: '${DOCKER_IMAGE_BACKEND?Variable not set}:${TAG-latest}'
     build:
@@ -52,12 +72,13 @@ services:
       - default
     depends_on:
       db:
-        condition: service_healthy
+        condition: service_healthy # 必须等数据库健康检查通过后才能运行
         restart: true
-    command: bash scripts/prestart.sh
+    command: bash scripts/prestart.sh # 执行预启动脚本
     env_file:
       - .env
     environment:
+      # 传递所有必要的后端环境变量
       - DOMAIN=${DOMAIN}
       - FRONTEND_HOST=${FRONTEND_HOST?Variable not set}
       - ENVIRONMENT=${ENVIRONMENT}
@@ -69,6 +90,7 @@ services:
       - SMTP_USER=${SMTP_USER}
       - SMTP_PASSWORD=${SMTP_PASSWORD}
       - EMAILS_FROM_EMAIL=${EMAILS_FROM_EMAIL}
+      # 数据库连接信息 (注意：这里服务器名是 'db'，即上面的 db 服务名)
       - POSTGRES_SERVER=db
       - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_DB=${POSTGRES_DB}
@@ -76,66 +98,78 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD?Variable not set}
       - SENTRY_DSN=${SENTRY_DSN}
 
-  backend:
-    image: '${DOCKER_IMAGE_BACKEND?Variable not set}:${TAG-latest}'
-    restart: always
-    networks:
-      - traefik-public
-      - default
-    depends_on:
-      db:
-        condition: service_healthy
-        restart: true
-      prestart:
-        condition: service_completed_successfully
-    env_file:
-      - .env
-    environment:
-      - DOMAIN=${DOMAIN}
-      - FRONTEND_HOST=${FRONTEND_HOST?Variable not set}
-      - ENVIRONMENT=${ENVIRONMENT}
-      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS}
-      - SECRET_KEY=${SECRET_KEY?Variable not set}
-      - FIRST_SUPERUSER=${FIRST_SUPERUSER?Variable not set}
-      - FIRST_SUPERUSER_PASSWORD=${FIRST_SUPERUSER_PASSWORD?Variable not set}
-      - SMTP_HOST=${SMTP_HOST}
-      - SMTP_USER=${SMTP_USER}
-      - SMTP_PASSWORD=${SMTP_PASSWORD}
-      - EMAILS_FROM_EMAIL=${EMAILS_FROM_EMAIL}
-      - POSTGRES_SERVER=db
-      - POSTGRES_PORT=${POSTGRES_PORT}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER?Variable not set}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD?Variable not set}
-      - SENTRY_DSN=${SENTRY_DSN}
+  # ---------------------------------------------------------------------------
+  # 4. 后端主服务 (Backend API)
+  # 运行 FastAPI 应用，处理业务逻辑
+  # ---------------------------------------------------------------------------
+  # backend:
+  #   image: '${DOCKER_IMAGE_BACKEND?Variable not set}:${TAG-latest}'
+  #   restart: always
+  #   networks:
+  #     - traefik-public
+  #     - default
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #       restart: true
+  #     prestart:
+  #       condition: service_completed_successfully # 必须等 prestart 成功完成后才启动
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     # 同 prestart 服务，需要相同的环境变量配置
+  #     - DOMAIN=${DOMAIN}
+  #     - FRONTEND_HOST=${FRONTEND_HOST?Variable not set}
+  #     - ENVIRONMENT=${ENVIRONMENT}
+  #     - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS}
+  #     - SECRET_KEY=${SECRET_KEY?Variable not set}
+  #     - FIRST_SUPERUSER=${FIRST_SUPERUSER?Variable not set}
+  #     - FIRST_SUPERUSER_PASSWORD=${FIRST_SUPERUSER_PASSWORD?Variable not set}
+  #     - SMTP_HOST=${SMTP_HOST}
+  #     - SMTP_USER=${SMTP_USER}
+  #     - SMTP_PASSWORD=${SMTP_PASSWORD}
+  #     - EMAILS_FROM_EMAIL=${EMAILS_FROM_EMAIL}
+  #     - POSTGRES_SERVER=db
+  #     - POSTGRES_PORT=${POSTGRES_PORT}
+  #     - POSTGRES_DB=${POSTGRES_DB}
+  #     - POSTGRES_USER=${POSTGRES_USER?Variable not set}
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD?Variable not set}
+  #     - SENTRY_DSN=${SENTRY_DSN}
 
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/utils/health-check/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+  #   # 后端健康检查：调用 API 的健康检查接口
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/utils/health-check/"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
 
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=traefik-public
-      - traefik.constraint-label=traefik-public
+  #   build:
+  #     context: .
+  #     dockerfile: backend/Dockerfile
+  #   labels:
+  #     # Traefik 配置
+  #     - traefik.enable=true
+  #     - traefik.docker.network=traefik-public
+  #     - traefik.constraint-label=traefik-public
 
-      - traefik.http.services.${STACK_NAME?Variable not set}-backend.loadbalancer.server.port=8000
+  #     # 负载均衡：转发到容器的 8000 端口 (FastAPI/Uvicorn 默认端口)
+  #     - traefik.http.services.${STACK_NAME?Variable not set}-backend.loadbalancer.server.port=8000
 
-      - traefik.http.routers.${STACK_NAME?Variable not set}-backend-http.rule=Host(`api.${DOMAIN?Variable not set}`)
-      - traefik.http.routers.${STACK_NAME?Variable not set}-backend-http.entrypoints=http
+  #     # HTTP 路由：api.你的域名 -> 后端
+  #     - traefik.http.routers.${STACK_NAME?Variable not set}-backend-http.rule=Host(`api.${DOMAIN?Variable not set}`)
+  #     - traefik.http.routers.${STACK_NAME?Variable not set}-backend-http.entrypoints=http
+  #     # HTTPS 路由
+  #     - traefik.http.routers.${STACK_NAME?Variable not set}-backend-https.rule=Host(`api.${DOMAIN?Variable not set}`)
+  #     - traefik.http.routers.${STACK_NAME?Variable not set}-backend-https.entrypoints=https
+  #     - traefik.http.routers.${STACK_NAME?Variable not set}-backend-https.tls=true
+  #     - traefik.http.routers.${STACK_NAME?Variable not set}-backend-https.tls.certresolver=le
+  #     # 强制 HTTP 转 HTTPS
+  #     - traefik.http.routers.${STACK_NAME?Variable not set}-backend-http.middlewares=https-redirect
 
-      - traefik.http.routers.${STACK_NAME?Variable not set}-backend-https.rule=Host(`api.${DOMAIN?Variable not set}`)
-      - traefik.http.routers.${STACK_NAME?Variable not set}-backend-https.entrypoints=https
-      - traefik.http.routers.${STACK_NAME?Variable not set}-backend-https.tls=true
-      - traefik.http.routers.${STACK_NAME?Variable not set}-backend-https.tls.certresolver=le
-
-      # Enable redirection for HTTP and HTTPS
-      - traefik.http.routers.${STACK_NAME?Variable not set}-backend-http.middlewares=https-redirect
-
+  # ---------------------------------------------------------------------------
+  # 5. 前端服务 (Frontend)
+  # 构建并运行前端静态资源 (通常是 React/Vue/Svelte)
+  # ---------------------------------------------------------------------------
   frontend:
     image: '${DOCKER_IMAGE_FRONTEND?Variable not set}:${TAG-latest}'
     restart: always
@@ -146,29 +180,36 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
       args:
+        # 构建时传入 API 地址，前端代码将通过此变量知道后端在哪里
         - VITE_API_URL=https://api.${DOMAIN?Variable not set}
         - NODE_ENV=production
     labels:
+      # Traefik 配置
       - traefik.enable=true
       - traefik.docker.network=traefik-public
       - traefik.constraint-label=traefik-public
 
+      # 负载均衡：转发到容器的 80 端口 (Nginx/Apache 默认端口)
       - traefik.http.services.${STACK_NAME?Variable not set}-frontend.loadbalancer.server.port=80
 
+      # HTTP 路由：dashboard.你的域名 -> 前端
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.rule=Host(`dashboard.${DOMAIN?Variable not set}`)
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.entrypoints=http
-
+      # HTTPS 路由
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.rule=Host(`dashboard.${DOMAIN?Variable not set}`)
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.entrypoints=https
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.tls=true
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.tls.certresolver=le
-
-      # Enable redirection for HTTP and HTTPS
+      # 强制 HTTP 转 HTTPS
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.middlewares=https-redirect
-volumes:
-  app-db-data:
 
+# 定义持久化卷
+volumes:
+  app-db-data: # 用于存储 PostgreSQL 数据
+
+# 定义网络
 networks:
   traefik-public:
-    # Allow setting it to false for testing
+    # external: true 表示这个网络是由外部创建的（通常由 Traefik 容器创建）
+    # 这样做的目的是让 Traefik 能够发现并代理这些服务
     external: true
